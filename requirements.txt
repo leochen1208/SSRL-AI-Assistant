@@ -1,0 +1,7 @@
+streamlit==1.59.1
+openai==2.44.0
+python-dotenv==1.2.2
+gspread==6.2.1
+google-auth==2.55.2
+pandas==3.0.3
+requests==2.34.2

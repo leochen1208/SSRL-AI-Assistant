@@ -1,0 +1,9 @@
+.env
+token.pickle
+client_secret.json
+service_account.json
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.spyproject/
+database/users.csv
