@@ -19,7 +19,7 @@ st.set_page_config(
 
 
 # ==========================
-# SSRL階段順序
+# SSRL 階段順序
 # ==========================
 
 PHASE_ORDER = {
@@ -39,23 +39,25 @@ VALID_PHASES = {
 }
 
 
-# 至少累積幾則學生發言後，才允許AI介入。
-# 設定為2，可以避免學生第一句話就被介入。
+# 至少累積幾則學生發言後，才允許 AI 介入。
+# 設定為 2，可以避免學生第一句話就被介入。
 MIN_MESSAGES_BEFORE_INTERVENTION = 2
 
 
 # ==========================
-# 初始化Session State
+# 初始化 Session State
 # ==========================
 
 def initialize_session_state() -> None:
     """
-    初始化Streamlit Session State。
+    初始化 Streamlit Session State。
     """
 
     default_values = {
         "login": False,
+        "username": "",
         "name": "",
+        "condition": "",
         "session_id": str(uuid.uuid4())[:8],
         "messages": [],
         "student_history": [],
@@ -63,9 +65,7 @@ def initialize_session_state() -> None:
     }
 
     for key, value in default_values.items():
-
         if key not in st.session_state:
-
             st.session_state[key] = value
 
 
@@ -78,13 +78,17 @@ initialize_session_state()
 
 def reset_discussion() -> None:
     """
-    清除目前討論紀錄並建立新的Session ID。
+    清除目前討論紀錄並建立新的 Session ID。
     """
 
     st.session_state.messages = []
     st.session_state.student_history = []
-    st.session_state.session_id = str(uuid.uuid4())[:8]
-    st.session_state.expected_phase = "task_understanding"
+    st.session_state.session_id = str(
+        uuid.uuid4()
+    )[:8]
+    st.session_state.expected_phase = (
+        "task_understanding"
+    )
 
 
 # ==========================
@@ -97,7 +101,10 @@ def logout() -> None:
     """
 
     st.session_state.login = False
+    st.session_state.username = ""
     st.session_state.name = ""
+    st.session_state.condition = ""
+
     reset_discussion()
 
 
@@ -110,7 +117,9 @@ def show_login_page() -> None:
     顯示登入介面。
     """
 
-    st.title("🤖 SSRL AI Assistant")
+    st.title(
+        "🤖 SSRL AI Assistant"
+    )
 
     st.write(
         "請輸入帳號與密碼進入討論系統。"
@@ -132,11 +141,10 @@ def show_login_page() -> None:
         type="primary",
         use_container_width=True,
     ):
-
         username = username.strip()
+        password = password.strip()
 
         if not username or not password:
-
             st.warning(
                 "請輸入帳號與密碼。"
             )
@@ -144,24 +152,37 @@ def show_login_page() -> None:
             return
 
         try:
-
-            name = check_login(
+            user = check_login(
                 username,
                 password,
             )
 
-        except Exception as error:
-
+        except RuntimeError as error:
             st.error(
-                f"登入系統發生錯誤：{error}"
+                str(error)
             )
 
             return
 
-        if name:
+        except Exception as error:
+            st.error(
+                f"登入系統發生未預期錯誤：{error}"
+            )
 
+            return
+
+        if user is not None:
             st.session_state.login = True
-            st.session_state.name = name
+            st.session_state.username = user[
+                "username"
+            ]
+            st.session_state.name = user[
+                "name"
+            ]
+            st.session_state.condition = user.get(
+                "condition",
+                "",
+            )
 
             reset_discussion()
 
@@ -172,49 +193,52 @@ def show_login_page() -> None:
             st.rerun()
 
         else:
-
             st.error(
-                "帳號或密碼錯誤"
+                "帳號或密碼錯誤，或帳號已停用。"
             )
 
 
 # ==========================
-# 分析SSRL狀態
+# 分析 SSRL 狀態
 # ==========================
 
 def analyze_current_state(
     expected_phase_before: str,
 ) -> dict:
     """
-    呼叫AI分析目前討論中的SSRL階段。
+    呼叫 AI 分析目前討論中的 SSRL 階段。
     """
 
     try:
-
         result = analyze_ssrl_state(
-            student_history=st.session_state.student_history,
+            student_history=(
+                st.session_state.student_history
+            ),
             expected_phase=expected_phase_before,
         )
 
-        if not isinstance(result, dict):
-
+        if not isinstance(
+            result,
+            dict,
+        ):
             raise TypeError(
-                "SSRL分析結果不是字典格式。"
+                "SSRL 分析結果不是字典格式。"
             )
 
         return result
 
     except Exception as error:
-
         st.warning(
             "階段分析發生問題，"
-            "本次暫時記錄為general。"
+            "本次暫時記錄為 general。"
         )
 
         return {
             "observed_phase": "general",
             "phase_completed": False,
-            "next_expected_phase": expected_phase_before,
+            "next_expected_phase": (
+                expected_phase_before
+            ),
             "reason": f"階段分析失敗：{error}",
         }
 
@@ -228,7 +252,7 @@ def validate_analysis_result(
     expected_phase_before: str,
 ) -> tuple[str, bool, str, str]:
     """
-    整理並驗證AI回傳的SSRL階段資料。
+    整理並驗證 AI 回傳的 SSRL 階段資料。
     """
 
     observed_phase = analysis_result.get(
@@ -252,21 +276,24 @@ def validate_analysis_result(
     )
 
     if observed_phase not in VALID_PHASES:
-
         observed_phase = "general"
 
     if next_expected_phase not in VALID_PHASES:
+        next_expected_phase = (
+            expected_phase_before
+        )
 
-        next_expected_phase = expected_phase_before
-
-    # 預期階段不能設定為general
+    # 預期階段不能設定為 general。
     if next_expected_phase == "general":
+        next_expected_phase = (
+            expected_phase_before
+        )
 
-        next_expected_phase = expected_phase_before
-
-    # 確保phase_completed為布林值
-    if not isinstance(phase_completed, bool):
-
+    # 確保 phase_completed 為布林值。
+    if not isinstance(
+        phase_completed,
+        bool,
+    ):
         phase_completed = str(
             phase_completed
         ).strip().lower() in {
@@ -292,21 +319,22 @@ def determine_intervention(
     expected_phase: str,
 ) -> bool:
     """
-    判斷學生是否跳過目前應進行的SSRL階段。
+    判斷學生是否跳過目前應進行的 SSRL 階段。
     """
 
     message_count = len(
         st.session_state.student_history
     )
 
-    # 無法辨識階段時不介入
+    # 無法辨識階段時不介入。
     if observed_phase == "general":
-
         return False
 
-    # 發言數不足時不介入
-    if message_count < MIN_MESSAGES_BEFORE_INTERVENTION:
-
+    # 發言數不足時不介入。
+    if (
+        message_count
+        < MIN_MESSAGES_BEFORE_INTERVENTION
+    ):
         return False
 
     observed_order = PHASE_ORDER.get(
@@ -319,12 +347,12 @@ def determine_intervention(
         1,
     )
 
-    # 學生進入尚未開放的後續階段
+    # 學生進入尚未開放的後續階段。
     return observed_order > expected_order
 
 
 # ==========================
-# 產生AI介入訊息
+# 產生 AI 介入訊息
 # ==========================
 
 def generate_intervention(
@@ -332,19 +360,19 @@ def generate_intervention(
     observed_phase: str,
 ) -> str:
     """
-    呼叫AI產生SSRL階段介入訊息。
+    呼叫 AI 產生 SSRL 階段介入訊息。
     """
 
     try:
-
         intervention_message = ask_ai(
-            student_history=st.session_state.student_history,
+            student_history=(
+                st.session_state.student_history
+            ),
             expected_phase=expected_phase,
             observed_phase=observed_phase,
         )
 
         if intervention_message is None:
-
             return ""
 
         return str(
@@ -352,18 +380,15 @@ def generate_intervention(
         ).strip()
 
     except Exception as error:
-
         st.error(
-            f"AI介入訊息產生失敗：{error}"
+            f"AI 介入訊息產生失敗：{error}"
         )
 
         return ""
 
 
 # ==========================
-# 寫入Google Sheet
-# OAuth Refresh Token由
-# google_sheet.py負責處理
+# 寫入 Google Sheet
 # ==========================
 
 def save_student_record(
@@ -377,19 +402,32 @@ def save_student_record(
     intervention_message: str,
 ) -> None:
     """
-    將學生訊息與SSRL分析結果寫入Google Sheet。
+    將學生訊息與 SSRL 分析結果
+    寫入 Google Sheet。
     """
 
     try:
+        # 優先使用 username 作為 student_id。
+        # 若 username 不存在，才使用 name。
+        student_id = (
+            st.session_state.username
+            or st.session_state.name
+        )
 
         save_chat(
-            student_id=st.session_state.name,
-            session_id=st.session_state.session_id,
+            student_id=student_id,
+            session_id=(
+                st.session_state.session_id
+            ),
             role="user",
             message=user_input,
             observed_phase=observed_phase,
-            expected_phase_before=expected_phase_before,
-            expected_phase_after=expected_phase_after,
+            expected_phase_before=(
+                expected_phase_before
+            ),
+            expected_phase_after=(
+                expected_phase_after
+            ),
             phase_completed=phase_completed,
             should_intervene=should_intervene,
             reason=reason,
@@ -397,9 +435,8 @@ def save_student_record(
         )
 
     except Exception as error:
-
         st.warning(
-            f"Google Sheet紀錄失敗：{error}"
+            f"Google Sheet 紀錄失敗：{error}"
         )
 
 
@@ -409,28 +446,27 @@ def save_student_record(
 
 def show_chat_page() -> None:
     """
-    顯示SSRL聊天介面。
+    顯示 SSRL 聊天介面。
     """
 
-    st.title("🤖 SSRL AI Assistant")
+    st.title(
+        "🤖 SSRL AI Assistant"
+    )
 
     top_left, top_right = st.columns(
         [3, 1]
     )
 
     with top_left:
-
         st.write(
             f"歡迎，{st.session_state.name}"
         )
 
     with top_right:
-
         if st.button(
             "登出",
             use_container_width=True,
         ):
-
             logout()
             st.rerun()
 
@@ -442,7 +478,6 @@ def show_chat_page() -> None:
         "🔄 開始新討論",
         use_container_width=True,
     ):
-
         reset_discussion()
         st.rerun()
 
@@ -452,11 +487,19 @@ def show_chat_page() -> None:
     )
 
     # 正式實驗若不希望學生看到目前階段，
-    # 可以刪除或註解以下三行。
+    # 可以刪除或註解以下內容。
     st.caption(
         f"系統目前預期階段："
         f"{st.session_state.expected_phase}"
     )
+
+    # 正式實驗若不希望學生看到組別條件，
+    # 請不要顯示以下內容。
+    #
+    # st.caption(
+    #     f"實驗條件："
+    #     f"{st.session_state.condition}"
+    # )
 
     st.divider()
 
@@ -465,11 +508,9 @@ def show_chat_page() -> None:
     # ==========================
 
     for message in st.session_state.messages:
-
         with st.chat_message(
             message["role"]
         ):
-
             st.write(
                 message["content"]
             )
@@ -483,13 +524,11 @@ def show_chat_page() -> None:
     )
 
     if not user_input:
-
         return
 
     user_input = user_input.strip()
 
     if not user_input:
-
         return
 
     expected_phase_before = (
@@ -517,20 +556,20 @@ def show_chat_page() -> None:
     # 2. 顯示學生訊息
     # ==========================
 
-    with st.chat_message("user"):
-
+    with st.chat_message(
+        "user"
+    ):
         st.write(
             user_input
         )
 
     # ==========================
-    # 3. 分析目前SSRL狀態
+    # 3. 分析目前 SSRL 狀態
     # ==========================
 
     with st.spinner(
         "正在分析小組討論狀態……"
     ):
-
         analysis_result = analyze_current_state(
             expected_phase_before
         )
@@ -550,13 +589,11 @@ def show_chat_page() -> None:
     # ==========================
 
     if phase_completed:
-
         st.session_state.expected_phase = (
             next_expected_phase
         )
 
     else:
-
         st.session_state.expected_phase = (
             expected_phase_before
         )
@@ -575,45 +612,55 @@ def show_chat_page() -> None:
     )
 
     # ==========================
-    # 6. 產生AI介入訊息
+    # 6. 產生 AI 介入訊息
     # ==========================
 
     intervention_message = ""
 
     if should_intervene:
-
         with st.spinner(
             "正在產生學習提示……"
         ):
-
             intervention_message = (
                 generate_intervention(
-                    expected_phase=expected_phase_after,
-                    observed_phase=observed_phase,
+                    expected_phase=(
+                        expected_phase_after
+                    ),
+                    observed_phase=(
+                        observed_phase
+                    ),
                 )
             )
 
     # ==========================
-    # 7. 寫入Google Sheet
+    # 7. 寫入 Google Sheet
     # ==========================
 
     save_student_record(
         user_input=user_input,
         observed_phase=observed_phase,
-        expected_phase_before=expected_phase_before,
-        expected_phase_after=expected_phase_after,
+        expected_phase_before=(
+            expected_phase_before
+        ),
+        expected_phase_after=(
+            expected_phase_after
+        ),
         phase_completed=phase_completed,
         should_intervene=should_intervene,
         reason=reason,
-        intervention_message=intervention_message,
+        intervention_message=(
+            intervention_message
+        ),
     )
 
     # ==========================
-    # 8. 顯示AI介入訊息
+    # 8. 顯示 AI 介入訊息
     # ==========================
 
-    if should_intervene and intervention_message:
-
+    if (
+        should_intervene
+        and intervention_message
+    ):
         assistant_message = {
             "role": "assistant",
             "content": intervention_message,
@@ -623,8 +670,9 @@ def show_chat_page() -> None:
             assistant_message
         )
 
-        with st.chat_message("assistant"):
-
+        with st.chat_message(
+            "assistant"
+        ):
             st.write(
                 intervention_message
             )
@@ -635,9 +683,7 @@ def show_chat_page() -> None:
 # ==========================
 
 if st.session_state.login:
-
     show_chat_page()
 
 else:
-
     show_login_page()
