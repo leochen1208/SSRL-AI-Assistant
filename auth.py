@@ -1,31 +1,22 @@
 from typing import Any, Optional
 
-from google_sheet import get_users_worksheet
+from google_sheet import get_users_records
 
 
-# ==========================
-# 判斷帳號是否啟用
-# ==========================
+ALLOWED_CONDITIONS = {
+    "structure",
+    "quality",
+    "hybrid",
+}
 
-def is_account_enabled(
-    value: Any,
-) -> bool:
-    """
-    判斷 Google Sheet 中的 enabled 欄位
-    是否代表帳號已啟用。
 
-    支援：
-    TRUE、YES、Y、1、ON
-
-    若 enabled 欄位空白，預設為啟用。
-    """
+def is_account_enabled(value: Any) -> bool:
+    """判斷 Google Sheet 中的 enabled 欄位是否代表帳號已啟用。"""
 
     if value is None:
         return True
 
-    normalized_value = str(
-        value
-    ).strip().upper()
+    normalized_value = str(value).strip().upper()
 
     if normalized_value == "":
         return True
@@ -39,10 +30,6 @@ def is_account_enabled(
     }
 
 
-# ==========================
-# 驗證登入
-# ==========================
-
 def check_login(
     username: str,
     password: str,
@@ -50,36 +37,20 @@ def check_login(
     """
     從 Google Sheet 的 Users 工作表驗證登入資料。
 
-    登入成功時回傳：
-
-    {
-        "username": "group01",
-        "name": "第一組",
-        "condition": "structure"
-    }
-
-    登入失敗、帳號停用或帳密錯誤時，
-    回傳 None。
+    Users 工作表至少需要以下欄位：
+    username、password、name、condition、room_id、enabled
     """
 
-    username = str(
-        username
-    ).strip()
-
-    password = str(
-        password
-    ).strip()
+    username = str(username).strip()
+    password = str(password).strip()
 
     if not username or not password:
         return None
 
     try:
-        worksheet = get_users_worksheet()
-
-        users = worksheet.get_all_records(
-            default_blank="",
-        )
-
+        # 使用 google_sheet.py 的快取版本，
+        # 避免每次登入都直接讀取 Google Sheet。
+        users = get_users_records()
     except Exception as error:
         raise RuntimeError(
             f"無法讀取 Google Sheet 的 Users 工作表：{error}"
@@ -87,51 +58,56 @@ def check_login(
 
     for user in users:
         saved_username = str(
-            user.get(
-                "username",
-                "",
-            )
+            user.get("username", "")
         ).strip()
 
         saved_password = str(
-            user.get(
-                "password",
-                "",
-            )
+            user.get("password", "")
         ).strip()
 
         saved_name = str(
-            user.get(
-                "name",
-                saved_username,
-            )
+            user.get("name", saved_username)
         ).strip()
 
         saved_condition = str(
-            user.get(
-                "condition",
-                "",
-            )
+            user.get("condition", "")
         ).strip().lower()
+
+        saved_room_id = str(
+            user.get("room_id", "")
+        ).strip()
 
         enabled_value = user.get(
             "enabled",
             "",
         )
 
-        if not is_account_enabled(
-            enabled_value
-        ):
+        if not is_account_enabled(enabled_value):
             continue
 
         if (
             saved_username == username
             and saved_password == password
         ):
+            if saved_condition not in ALLOWED_CONDITIONS:
+                raise RuntimeError(
+                    f"帳號 {saved_username} 的 condition 設定錯誤："
+                    f"{saved_condition or '空白'}。"
+                    "請設定為 structure、quality 或 hybrid。"
+                )
+
+            if not saved_room_id:
+                raise RuntimeError(
+                    f"帳號 {saved_username} 尚未設定 room_id。"
+                    "請在 Users 工作表中填入聊天室編號，"
+                    "例如 group01。"
+                )
+
             return {
                 "username": saved_username,
                 "name": saved_name or saved_username,
                 "condition": saved_condition,
+                "room_id": saved_room_id,
             }
 
     return None

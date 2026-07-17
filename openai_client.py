@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -7,112 +8,95 @@ from openai import OpenAI
 from prompt_loader import load_prompt
 
 
-# ==========================
-# 讀取本機環境變數
-# ==========================
-
 load_dotenv()
 
-
-# ==========================
-# 取得OpenAI API Key
-# ==========================
-
-def get_openai_api_key() -> str:
-    """
-    取得OpenAI API Key。
-
-    讀取順序：
-    1. 本機.env或作業系統環境變數
-    2. Streamlit Cloud的st.secrets
-    """
-
-    # 本機開發環境
-    api_key = os.getenv("OPENAI_API_KEY")
-
-    if api_key:
-        return api_key.strip()
-
-    # Streamlit Cloud
-    try:
-        api_key = st.secrets["OPENAI_API_KEY"]
-
-        if isinstance(api_key, str) and api_key.strip():
-            return api_key.strip()
-
-    except (KeyError, FileNotFoundError):
-        pass
-
-    raise RuntimeError(
-        "找不到OPENAI_API_KEY。"
-        "本機請檢查.env檔案；"
-        "Streamlit Cloud請檢查App Secrets。"
-    )
-
-
-# ==========================
-# 建立OpenAI Client
-# ==========================
-
-client = OpenAI(
-    api_key=get_openai_api_key()
-)
-
-
-# ==========================
-# 載入研究者設定的SSRL Prompt
-# ==========================
-
-SSRL_prompt = load_prompt()
-
-
-# ==========================
-# SSRL階段順序
-# ==========================
+MODEL_NAME = "gpt-4.1-mini"
 
 PHASE_SEQUENCE = [
     "task_understanding",
     "planning",
     "monitoring",
-    "reflection"
+    "reflection",
 ]
 
+VALID_EXPECTED_PHASES = set(PHASE_SEQUENCE)
+VALID_OBSERVED_PHASES = VALID_EXPECTED_PHASES | {"general"}
 
-# ==========================
-# 有效階段集合
-# ==========================
-
-VALID_EXPECTED_PHASES = {
-    "task_understanding",
-    "planning",
-    "monitoring",
-    "reflection"
-}
-
-VALID_OBSERVED_PHASES = {
-    "task_understanding",
-    "planning",
-    "monitoring",
-    "reflection",
-    "general"
+VALID_QUALITY_TRIGGER_TYPES = {
+    "negative_value_monitoring",
+    "concept_confusion",
+    "lack_of_shared_perspective",
+    "none",
 }
 
 
-# ==========================
-# 清理學生討論紀錄
-# ==========================
+def get_openai_api_key() -> str:
+    """從本機 .env 或 Streamlit Secrets 取得 OpenAI API Key。"""
 
-def clean_student_history(student_history):
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if api_key:
+        return api_key.strip()
+
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+
+        if isinstance(api_key, str) and api_key.strip():
+            return api_key.strip()
+    except (KeyError, FileNotFoundError):
+        pass
+
+    raise RuntimeError(
+        "找不到 OPENAI_API_KEY。"
+        "本機請檢查 .env；Streamlit Cloud 請檢查 App Secrets。"
+    )
+
+
+client = OpenAI(api_key=get_openai_api_key())
+SSRL_prompt = load_prompt()
+
+
+def normalize_speaker(value: Any) -> str:
+    """清理發言者名稱，避免將空白或過長文字放入模型訊息。"""
+
+    speaker = str(value or "").strip()
+
+    if not speaker:
+        return "小組成員"
+
+    return speaker[:50]
+
+
+def clean_student_history(student_history: list[dict]) -> list[dict]:
+    """
+    將多人聊天室紀錄整理成 OpenAI 可讀格式。
+
+    支援以下輸入：
+    {
+        "role": "user",
+        "content": "我們先確認題目",
+        "speaker": "小明"
+    }
+
+    或：
+    {
+        "role": "user",
+        "content": "我們先確認題目",
+        "sender_name": "小明"
+    }
+
+    每筆訊息會轉成：
+    小明：我們先確認題目
+
+    如此模型可以辨識不同組員，而不是將全部發言視為同一位學生。
+    """
 
     if not isinstance(student_history, list):
-        raise TypeError(
-            "student_history必須是訊息列表。"
-        )
+        raise TypeError("student_history 必須是訊息列表。")
 
     valid_history = []
 
     for item in student_history:
-
         if not isinstance(item, dict):
             continue
 
@@ -126,361 +110,200 @@ def clean_student_history(student_history):
         if not content:
             continue
 
-        valid_history.append(
-            {
-                "role": "user",
-                "content": content
-            }
+        speaker = normalize_speaker(
+            item.get("speaker")
+            or item.get("sender_name")
+            or item.get("name")
         )
+
+        valid_history.append({
+            "role": "user",
+            "content": f"{speaker}：{content}",
+        })
 
     return valid_history
 
 
-# ==========================
-# 取得下一個SSRL階段
-# ==========================
-
-def get_next_phase(current_phase):
+def get_next_phase(current_phase: str) -> str:
+    """取得目前階段完成後的下一個預期階段。"""
 
     if current_phase not in PHASE_SEQUENCE:
         return "task_understanding"
 
-    current_index = PHASE_SEQUENCE.index(
-        current_phase
-    )
+    current_index = PHASE_SEQUENCE.index(current_phase)
 
-    # reflection已經是最後階段
     if current_index >= len(PHASE_SEQUENCE) - 1:
         return "reflection"
 
-    return PHASE_SEQUENCE[
-        current_index + 1
-    ]
+    return PHASE_SEQUENCE[current_index + 1]
 
-
-# ==========================
-# 預設SSRL分析結果
-# ==========================
 
 def get_default_analysis_result(
-    expected_phase,
-    reason
-):
-
+    expected_phase: str,
+    reason: str,
+) -> dict:
     return {
         "observed_phase": "general",
         "phase_completed": False,
         "next_expected_phase": expected_phase,
-        "reason": reason
+        "reason": reason,
     }
 
 
-# ==========================
-# 分析SSRL狀態
-# ==========================
+def get_default_quality_result(reason: str) -> dict:
+    return {
+        "triggered": False,
+        "trigger_type": "none",
+        "intervention": "",
+        "reason": reason,
+    }
+
+
+def parse_json_response(
+    response_content: str | None,
+) -> dict | None:
+    """安全解析模型 JSON 回覆。"""
+
+    try:
+        result = json.loads(response_content or "")
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(result, dict):
+        return None
+
+    return result
+
 
 def analyze_ssrl_state(
-    student_history,
-    expected_phase
-):
+    student_history: list[dict],
+    expected_phase: str,
+) -> dict:
+    """
+    分析整個小組目前主要展現的 SSRL 階段。
 
-    valid_history = clean_student_history(
-        student_history
-    )
+    所有 Structure、Quality、Hybrid 組別都會執行此分析。
+    """
+
+    valid_history = clean_student_history(student_history)
 
     if expected_phase not in VALID_EXPECTED_PHASES:
         expected_phase = "task_understanding"
 
     if not valid_history:
-
         return get_default_analysis_result(
-            expected_phase=expected_phase,
-            reason="尚無學生討論內容。"
+            expected_phase,
+            "尚無小組討論內容。",
         )
-
-    next_phase = get_next_phase(
-        expected_phase
-    )
 
     analysis_prompt = f"""
 【角色】
+你是一個社會共享調節學習（SSRL）階段分析助理。
 
-你是一個社會共享調節學習（Socially Shared Regulation of Learning, SSRL）階段監控助理。
+你的分析單位是「整個小組」，不是單一學生。
+student_history 包含同一聊天室中，不同小組成員依時間排列的發言。
+每則發言前方會標示發言者，例如「小明：……」。
 
-你的任務是協助學生依照 SSRL 的四個階段進行合作學習。你只負責判斷小組目前的討論處於哪一個 SSRL 階段，並在學生跳過必要階段時提供引導。
+你只負責：
+1. 判斷小組目前主要展現的 SSRL 階段。
+2. 判斷小組是否已完成目前預期階段的核心共同調節行為。
 
-你不提供任務答案，不評價學生想法的正確性或品質，也不負責處理學生的情緒、動機或合作品質問題。
+你不提供任務答案，也不評估調節品質。
 
----
+【SSRL 階段】
+1. task_understanding
+小組成員共同確認、重述、解釋或釐清任務主題、要求、目標、產出或限制。
+只有個別成員單方面陳述，且其他成員尚未回應、確認或協商時，不宜直接視為已形成共同任務理解。
 
-【SSRL階段架構】
+2. planning
+小組共同設定目標，協商策略、步驟、時間、分工或工作流程。
+只有個人宣告自己要做什麼，但沒有與其他成員形成共同安排時，不宜視為完成共同規劃。
 
-請根據學生當下的發言及必要的對話脈絡，判斷該發言主要屬於以下哪一個階段：
+3. monitoring
+小組實際提出答案、想法、理由、例子或方案；檢查進度、理解、策略效果、問題，並進行修正或調整。
+單純提出任務內容、理由、案例或方案，通常判定為 monitoring。
 
-### 1. task_understanding：任務理解
+4. reflection
+小組回顧或評估已進行或已完成的成果、合作過程或策略效果，並提出改善方式。
 
-學生正在共同確認、重述、解釋或釐清任務的主題、要求、目標、產出形式或限制，以建立對任務的共同理解。
+5. general
+閒聊、簡短附和、拒絕參與、單純困惑、無意義內容、要求直接答案，或資訊不足以判斷 SSRL 階段。
 
-例如：
+【判斷原則】
+- 每次只判定一個最主要階段。
+- 判斷整個小組最近主要正在做什麼，而不是只看某一位成員。
+- 不要求每一位成員都發言，但必須有可觀察的共同確認、協商、整合或回應。
+- 「好」、「同意」、「可以」等簡短回應，可作為共同確認的證據，但需結合前文判斷。
+- 單純表示不知道、不想做或要求答案，屬於 general。
+- 檢查當下進度或方法屬於 monitoring。
+- 回顧已完成成果或整體合作過程屬於 reflection。
+- 小組可以回到先前階段補充，仍依當下實際行為分類。
+- 資訊不足時使用 general。
 
-* 今天要討論什麼？
-* 我們今天的任務是什麼？
-* 我們要討論AI如何融入教學。
-* 所以我們要完成一份AI教學活動設計，對嗎？
-* 題目要求我們同時討論AI的優點和風險。
-* 最後是不是要提出一個具體的教學方案？
+【phase_completed 判斷】
+目前預期階段是：{expected_phase}
 
-只有當發言實際涉及任務內容、要求或目標的確認與釐清時，才判定為 `task_understanding`。
+只有在小組已形成該階段的「共同結果」時，才回傳 true。
 
-以下情況不屬於 `task_understanding`：
+task_understanding 完成：
+小組已形成對任務要求、目的、產出或限制的共同理解。
 
-* 我不知道。
-* 不知道怎麼開始。
-* 不知道怎麼做。
-* 不想做。
-* 隨便。
+planning 完成：
+小組已形成可執行的共同目標、策略、步驟或分工。
 
-上述內容若沒有進一步釐清任務，應判定為 `general`。
+monitoring 完成：
+小組已實際推進任務內容，並形成足以進入成果回顧的內容或方案。
 
-### 2. planning：目標設定與規劃
+reflection 完成：
+小組已完成對成果或合作過程的評估，並提出至少一項結論或改善方向。
 
-學生正在設定共同目標、決定完成任務的策略、安排討論步驟、時間、分工或工作流程。
+若最新發言屬於其他階段、general，或只由個別成員提及但尚未形成共同結果，回傳 false。
 
-例如：
+【next_expected_phase】
+請原樣回傳目前預期階段：{expected_phase}
+Python 程式會自行更新階段，模型不要自行推進。
 
-* 我們的目標是設計一個可以實際使用的AI教學活動。
-* 我們先討論AI的用途，再討論可能的風險。
-* 我們可以先列出三個重點。
-* 你負責整理案例，我負責設計活動。
-* 我們先花五分鐘想方法，再一起整合。
-* 接下來先決定教學目標，再選擇適合的AI工具。
-
-單純提出一個任務答案、內容、例子或個人看法，不屬於 `planning`。
-
-例如：
-
-* AI可以作為學生的學習助手。
-* 教師可以使用AI產生題目。
-
-上述內容是在實際執行任務，應判定為 `monitoring`。
-
-### 3. monitoring：執行與監控
-
-學生正在實際執行任務，例如提出答案、想法、理由、例子或方案；或正在檢查進度、確認理解、監控策略效果、發現問題及調整方法。
-
-執行任務的例子：
-
-* AI可以作為學習助手，讓學生隨時提問。
-* 教師可以利用AI產生不同難度的題目。
-* 我覺得AI融入教學的優點是可以提供即時回饋。
-* 一個具體做法是讓學生先回答問題，再請AI提供提示。
-* 這項活動可以安排在課堂的練習階段。
-
-監控與調整的例子：
-
-* 我們現在做到哪裡？
-* 這樣有回答到題目嗎？
-* 我們是不是還少了風險的部分？
-* 大家都同意這個做法嗎？
-* 這個方法好像行不通，我們換一種方式。
-* 我們目前的內容和原本目標一致嗎？
-
-只要學生正在產出任務內容，或檢查與調整任務執行過程，皆判定為 `monitoring`。
-
-### 4. reflection：反思
-
-學生正在回顧、評估已完成的成果、討論過程、合作表現或策略效果，並可能提出下一次的改進方式。
-
-例如：
-
-* 這次我們做得不太好。
-* 我覺得我們的答案太簡略了。
-* 剛才分工不清楚，所以花了太多時間。
-* 我們這次有回答到題目，但缺少具體例子。
-* 剛才使用的方法很有效。
-* 下次應該先確認任務，再開始提出答案。
-* 下次可以先分工，討論會更有效率。
-
-只有當學生是在回顧或評估已經進行或完成的討論與成果時，才判定為 `reflection`。
-
-### 5. general：無法判定階段
-
-發言無法明確歸入上述四個階段，或只是閒聊、簡短回應、表達情緒、拒絕參與、單純困惑、無意義內容或資訊不足。
-
-例如：
-
-* 不知道。
-* 不知道怎麼做。
-* 不想做。
-* 隨便。
-* 好。
-* 喔。
-* 哈哈哈。
-* 結束。
-* 今天午餐吃什麼？
-* 你直接告訴我答案。
-
-不要因為發言中出現「任務」、「討論」、「怎麼做」等字詞，就直接判定為某一階段。必須依照發言實際表達的調節行為進行判斷。
-
----
-
-【階段判斷原則】
-
-1. 每次只判定一個最主要的階段。
-
-2. 應依據學生實際展現的調節行為判斷，而不是只依靠單一關鍵字。
-
-3. 若一句話同時包含不同階段，以該句最主要的功能判斷。
-
-4. 單純提出任務答案、內容、理由、案例或方案，判定為 `monitoring`，不要判定為 `planning`。
-
-5. 單純表示不知道、困惑、不願意參與或要求直接取得答案，判定為 `general`，不要判定為 `task_understanding`。
-
-6. 檢查目前進度或調整當下方法，判定為 `monitoring`；回顧已完成的成果或整體過程，判定為 `reflection`。
-
-7. 學生可以回到先前已完成的階段重新討論。例如，在執行過程中重新確認任務要求，仍可判定為 `task_understanding`，且不視為階段順序失衡。
-
-8. 若資訊不足以確定任何階段，判定為 `general`，不要勉強分類。
-
----
-
-【介入規則】
-
-學生原則上應依照以下順序進行討論：
-
-`task_understanding → planning → monitoring → reflection`
-
-請持續記錄小組已經實際討論過的階段。
-
-只有在學生跳過尚未完成的必要階段，直接進入後續階段時，才主動介入。
-
-例如：
-
-* 尚未進行 `task_understanding`，便直接進入 `planning`、`monitoring` 或 `reflection`。
-* 已完成 `task_understanding`，但尚未進行 `planning`，便直接進入 `monitoring` 或 `reflection`。
-* 已完成 `task_understanding` 與 `planning`，但尚未進行 `monitoring`，便直接進入 `reflection`。
-
-介入時，應針對目前被跳過的最早階段提出引導問題。
-
-若學生已經討論過某個階段，後續重新回到該階段補充、修正或重新確認，屬於合理的循環調節，不需介入。
-
-`general` 不代表學生進入新的 SSRL 階段，也不會使階段進度向前推進。
-
-若學生發言被判定為 `general`，但沒有跳過階段，請保持沉默。
-
-若沒有觸發階段順序失衡，請保持沉默，不輸出任何給學生看的內容。
-
----
-
-【各階段介入提問】
-
-若缺少 `task_understanding`，可從以下問題選擇一題：
-
-* 你們可以先共同確認這次任務要完成什麼嗎？
-* 你們對任務要求的理解一致嗎？
-* 這次討論需要完成哪些內容？
-
-若缺少 `planning`，可從以下問題選擇一題：
-
-* 你們打算如何完成這次任務？
-* 你們可以先安排討論步驟或分工嗎？
-* 你們接下來準備採用什麼方式進行？
-
-若缺少 `monitoring`，可從以下問題選擇一題：
-
-* 你們可以先實際提出並整理任務內容嗎？
-* 你們目前的內容是否正在朝共同目標前進？
-* 你們還需要完成哪些內容？
-
-若需要引導進入 `reflection`，可從以下問題選擇一題：
-
-* 你們可以評估目前的成果是否達成目標嗎？
-* 你們認為這次討論有哪些地方可以改進？
-* 你們可以回顧剛才的合作與討論過程嗎？
-
----
-
-【介入格式】
-
-每次介入時：
-
-* 僅輸出1至2句。
-* 僅提出一個主要問題。
-* 語氣保持中性。
-* 不提供任務答案。
-* 不評價學生想法。
-* 不補充理論說明。
-* 不延伸對話。
-* 不連續追問第二題。
-* 只輸出給學生看的引導文字。
-
-若未觸發介入條件，請保持沉默，不輸出任何內容。
-
-
-請只輸出JSON，不得輸出Markdown或其他文字。
-
-輸出格式：
-
+請只輸出 JSON：
 {{
-    "observed_phase": "planning",
-    "phase_completed": false,
-    "next_expected_phase": "{expected_phase}",
-    "reason": "學生正在討論分工，但尚未形成完整的共同計畫。"
+  "observed_phase": "monitoring",
+  "phase_completed": false,
+  "next_expected_phase": "{expected_phase}",
+  "reason": "簡短說明小組行為與判斷依據。"
 }}
 """
 
     try:
-
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=MODEL_NAME,
             messages=[
                 {
                     "role": "system",
-                    "content": analysis_prompt
+                    "content": analysis_prompt,
                 },
-                *valid_history
+                *valid_history,
             ],
-            response_format={
-                "type": "json_object"
-            },
-            temperature=0
+            response_format={"type": "json_object"},
+            temperature=0,
         )
-
     except Exception as error:
-
         return get_default_analysis_result(
-            expected_phase=expected_phase,
-            reason=(
-                "OpenAI API分析失敗："
-                f"{type(error).__name__}"
-            )
+            expected_phase,
+            f"OpenAI API 階段分析失敗：{type(error).__name__}",
         )
 
-    content = response.choices[0].message.content
+    result = parse_json_response(
+        response.choices[0].message.content
+    )
 
-    if not content:
-
+    if result is None:
         return get_default_analysis_result(
-            expected_phase=expected_phase,
-            reason="模型沒有回傳分析結果。"
-        )
-
-    try:
-
-        result = json.loads(
-            content
-        )
-
-    except (json.JSONDecodeError, TypeError):
-
-        return get_default_analysis_result(
-            expected_phase=expected_phase,
-            reason="模型回傳內容不是有效JSON。"
+            expected_phase,
+            "模型回傳內容不是有效 JSON。",
         )
 
     observed_phase = result.get(
         "observed_phase",
-        "general"
+        "general",
     )
 
     if observed_phase not in VALID_OBSERVED_PHASES:
@@ -488,59 +311,226 @@ def analyze_ssrl_state(
 
     phase_completed = result.get(
         "phase_completed",
-        False
+        False,
     )
 
-    # 確保一定是布林值
     if not isinstance(phase_completed, bool):
         phase_completed = False
 
-    # 不直接相信模型提供的next_expected_phase，
-    # 由Python依照固定順序更新。
-    if phase_completed:
-
-        next_expected_phase = get_next_phase(
-            expected_phase
-        )
-
-    else:
-
-        next_expected_phase = expected_phase
-
-    reason = result.get(
-        "reason",
-        ""
+    next_expected_phase = (
+        get_next_phase(expected_phase)
+        if phase_completed
+        else expected_phase
     )
 
-    if not isinstance(reason, str):
-        reason = str(reason)
-
-    reason = reason.strip()
+    reason = str(
+        result.get("reason", "")
+    ).strip()
 
     if not reason:
-        reason = "模型未提供判斷理由。"
+        reason = "模型未提供階段判斷理由。"
 
     return {
         "observed_phase": observed_phase,
         "phase_completed": phase_completed,
         "next_expected_phase": next_expected_phase,
-        "reason": reason
+        "reason": reason,
     }
 
 
-# ==========================
-# 產生階段介入訊息
-# ==========================
+def analyze_quality_state(
+    student_history: list[dict],
+) -> dict:
+    """
+    分析整個小組的 SSRL 調節品質。
+
+    Quality 與 Hybrid 組使用。
+    """
+
+    valid_history = clean_student_history(student_history)
+
+    if len(valid_history) < 3:
+        return get_default_quality_result(
+            "有效小組發言少於三個回合，尚未檢查品質介入條件。"
+        )
+
+    # 最近三回合為主要判斷依據，額外保留前五回合協助理解語境。
+    recent_history = valid_history[-8:]
+
+    quality_prompt = """
+【角色】
+你是一個 SSRL 調節品質助理。
+
+你的分析單位是「整個小組」，不是單一學生。
+輸入包含同一聊天室中不同組員依時間排列的發言，
+每則發言前方會標示發言者，例如「小明：……」。
+
+你的任務是評估小組是否出現特定的調節品質問題，
+並在符合介入條件時提供簡短引導。
+
+你不負責監控 SSRL 階段順序，也不提供任務答案。
+
+【判斷範圍】
+以最近三個有效小組發言回合為主要判斷範圍；
+更早內容只用來理解語境與確認問題是否已被釐清。
+
+「三個發言回合」可以來自同一位或不同組員。
+但你必須分析這些發言是否構成小組層次的持續問題，
+不能因某位成員單次表達就推論整組都有問題。
+
+同一輪最多觸發一種條件，必須依下列順序檢查：
+1. negative_value_monitoring
+2. concept_confusion
+3. lack_of_shared_perspective
+
+若前一項成立，不再檢查後面的條件。
+
+【條件一：negative_value_monitoring】
+最近連續三個有效發言，都對目前能力、方法、進展或成功可能性表達明確負向評估，
+例如做不到、不能完成、沒有辦法、這樣不行、一定會失敗。
+
+以下情況不應觸發：
+- 只出現單一「不」字。
+- 合理否定某個答案。
+- 比較不同方案。
+- 修正錯誤。
+- 表達不同意，但仍持續討論。
+- 一位成員負向表達後，其他成員已提出可行方法或鼓勵。
+
+介入方向：
+簡短指出小組遇到困難，再引導描述問題、辨識資源或思考如何取得進展。
+
+【條件二：concept_confusion】
+最近三個有效發言持續表達困惑、不理解，
+或持續指向同一知識概念、任務要求或方法理解問題，
+而且小組尚未自行釐清，也沒有形成可行理解。
+
+以下情況不應觸發：
+- 只有一個發言表示困惑。
+- 後續成員已提供合理解釋，且小組已確認理解。
+- 只是對不同方案進行詢問或澄清，但討論仍有效推進。
+
+介入方向：
+指出小組可能仍有困惑，再引導成員說明目前想理解的內容或共同確認理解。
+
+【條件三：lack_of_shared_perspective】
+最近三個有效發言持續以個人立場、個人決定或個人任務為中心，
+且沒有出現整合觀點、共同目標、共同計畫、協商或相互回應。
+
+不能只看「我／你」的字面詞頻。
+必須從語意判斷小組是否缺乏共同調節。
+
+以下情況不應觸發：
+- 正常分工，例如「我找資料，你整理」。
+- 成員交換不同意見後正在協商。
+- 使用「我認為」提出想法，但後續有整合或回應。
+- 一句話出現我、你，就直接判定缺乏共享觀點。
+
+介入方向：
+指出目前討論較偏向個人觀點，
+再引導小組整合觀點、形成共同目標或共同計畫。
+
+【介入格式】
+- 只輸出一至二句。
+- 最多一個主要問題。
+- 語氣中性。
+- 使用「你們」稱呼整個小組。
+- 不提供任務答案。
+- 不評價學生想法正確性。
+- 不補充 SSRL 理論。
+- 沒有觸發時 intervention 必須是空字串。
+
+請只輸出 JSON：
+{
+  "triggered": true,
+  "trigger_type": "concept_confusion",
+  "intervention": "我注意到你們可能還有些困惑。你們目前最需要共同釐清的是什麼？",
+  "reason": "最近三個發言持續針對相同內容表達困惑，且尚未形成共同理解。"
+}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": quality_prompt,
+                },
+                *recent_history,
+            ],
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+    except Exception as error:
+        return get_default_quality_result(
+            f"OpenAI API 品質分析失敗：{type(error).__name__}"
+        )
+
+    result = parse_json_response(
+        response.choices[0].message.content
+    )
+
+    if result is None:
+        return get_default_quality_result(
+            "模型回傳的品質分析不是有效 JSON。"
+        )
+
+    triggered = result.get(
+        "triggered",
+        False,
+    )
+
+    if not isinstance(triggered, bool):
+        triggered = False
+
+    trigger_type = result.get(
+        "trigger_type",
+        "none",
+    )
+
+    if trigger_type not in VALID_QUALITY_TRIGGER_TYPES:
+        trigger_type = "none"
+
+    intervention = str(
+        result.get("intervention", "")
+    ).strip()
+
+    reason = str(
+        result.get("reason", "")
+    ).strip()
+
+    if not triggered or trigger_type == "none":
+        triggered = False
+        trigger_type = "none"
+        intervention = ""
+
+    if triggered and not intervention:
+        intervention = get_default_quality_intervention(
+            trigger_type
+        )
+
+    if not reason:
+        reason = "模型未提供品質判斷理由。"
+
+    return {
+        "triggered": triggered,
+        "trigger_type": trigger_type,
+        "intervention": intervention,
+        "reason": reason,
+    }
+
 
 def ask_ai(
-    student_history,
-    expected_phase,
-    observed_phase
-):
+    student_history: list[dict],
+    expected_phase: str,
+    observed_phase: str,
+) -> str:
+    """
+    Structure 或 Hybrid 組發生跳階時，產生小組層次的結構介入訊息。
+    """
 
-    valid_history = clean_student_history(
-        student_history
-    )
+    valid_history = clean_student_history(student_history)
 
     if not valid_history:
         return ""
@@ -552,118 +542,121 @@ def ask_ai(
         observed_phase = "general"
 
     intervention_control = f"""
+【分析單位】
+目前對話來自同一小組的多位成員。
+每則發言前方標示發言者。
+請對整個小組說話，使用「你們」，不要針對單一成員。
+
 【本次系統判斷】
+小組最新主要討論階段：{observed_phase}
+小組目前應先完成的階段：{expected_phase}
 
-學生最新討論階段：
-{observed_phase}
+小組已進入較後面的階段，因此本次必須介入。
+請提出一個簡短問題，引導整個小組回到目前應完成的階段。
 
-學生目前應進行的階段：
-{expected_phase}
-
-系統已經確認學生進入尚未開放的後續階段，
-因此本次必須介入。
-
-請依照目前應進行的階段，
-提出一個簡短問題，引導學生回到該階段。
-
-
-【各階段介入方向】
-
+【介入方向】
 task_understanding：
-引導學生共同確認任務要求、問題內容或任務目的。
+引導小組共同確認任務要求、問題內容、任務目的、產出或限制。
 
 planning：
-引導學生設定共同目標，
-或討論策略、流程、時間安排與分工。
+引導小組形成共同目標，或協商策略、流程、時間與分工。
 
 monitoring：
-引導學生檢查目前進度、執行情形、
-遇到的問題或是否需要調整方法。
+引導小組提出並整理任務內容，或共同檢查進度、問題及方法調整。
 
 reflection：
-引導學生回顧成果、評估合作過程，
-或提出可以改進的地方。
-
+引導小組共同回顧成果、合作過程、策略效果或可改進之處。
 
 【輸出限制】
-
-1. 僅輸出給學生看的介入文字。
-2. 僅輸出1至2句。
-3. 語氣中性。
-4. 最多提出一個問題。
-5. 不提供任務答案。
-6. 不評價學生想法品質。
-7. 不解釋SSRL理論。
-8. 不輸出階段名稱。
-9. 不輸出判斷理由。
-10. 不輸出NO_INTERVENTION。
+- 只輸出給小組成員看的介入文字。
+- 一至二句。
+- 最多一個主要問題。
+- 使用「你們」。
+- 語氣中性。
+- 不提供答案。
+- 不評價想法。
+- 不解釋 SSRL。
+- 不輸出階段名稱。
+- 不輸出系統判斷理由。
 """
 
     try:
-
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=MODEL_NAME,
             messages=[
                 {
                     "role": "system",
-                    "content": SSRL_prompt
+                    "content": SSRL_prompt,
                 },
                 {
                     "role": "system",
-                    "content": intervention_control
+                    "content": intervention_control,
                 },
-                *valid_history
+                *valid_history,
             ],
-            temperature=0
+            temperature=0,
         )
-
     except Exception:
-
         return get_default_intervention(
             expected_phase
         )
 
-    content = response.choices[0].message.content
+    content = str(
+        response.choices[0].message.content or ""
+    ).strip()
 
-    if not content:
-
-        return get_default_intervention(
-            expected_phase
-        )
-
-    content = content.strip()
-
-    if not content:
-
-        return get_default_intervention(
-            expected_phase
-        )
-
-    return content
+    return content or get_default_intervention(
+        expected_phase
+    )
 
 
-# ==========================
-# 預設備援介入文字
-# ==========================
-
-def get_default_intervention(expected_phase):
-
+def get_default_intervention(
+    expected_phase: str,
+) -> str:
     default_messages = {
-
-        "task_understanding":
-            "請先共同確認這項任務要求你們完成什麼。你們對任務內容的理解一致嗎？",
-
-        "planning":
-            "請先共同規劃接下來的做法。你們準備如何分工或安排步驟？",
-
-        "monitoring":
-            "請先檢查目前的執行情形。現在的進度是否符合原先規劃？",
-
-        "reflection":
-            "請一起回顧這次的成果與合作過程。有哪些地方可以改進？"
+        "task_understanding": (
+            "請先共同確認這項任務要求你們完成什麼。"
+            "你們對任務內容的理解一致嗎？"
+        ),
+        "planning": (
+            "請先共同規劃接下來的做法。"
+            "你們準備如何分工或安排步驟？"
+        ),
+        "monitoring": (
+            "請先共同整理目前的任務內容與進度。"
+            "你們接下來還需要完成什麼？"
+        ),
+        "reflection": (
+            "請一起回顧這次的成果與合作過程。"
+            "你們認為有哪些地方可以改進？"
+        ),
     }
 
     return default_messages.get(
         expected_phase,
-        ""
+        "",
+    )
+
+
+def get_default_quality_intervention(
+    trigger_type: str,
+) -> str:
+    default_messages = {
+        "negative_value_monitoring": (
+            "我注意到你們遇到了一些困難。"
+            "你們可以先共同描述目前發生了什麼嗎？"
+        ),
+        "concept_confusion": (
+            "我注意到你們可能還有些困惑。"
+            "你們目前最需要共同釐清的是什麼？"
+        ),
+        "lack_of_shared_perspective": (
+            "我注意到你們目前較偏向個人觀點。"
+            "你們可以如何整合成共同計畫？"
+        ),
+    }
+
+    return default_messages.get(
+        trigger_type,
+        "",
     )
